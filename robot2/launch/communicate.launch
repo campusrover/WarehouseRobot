@@ -1,0 +1,13 @@
+<launch>
+    <!-- Robot 1 -->
+    <node name="robot_1" pkg="robot2" type="community.py" output="screen">
+        <param name="robot_name" value="robb"/>
+        <param name="robot_type" value="Tbot"/>
+    </node>
+
+    <!-- Robot 2 -->
+    <node name="robot_2" pkg="robot2" type="community.py" output="screen">
+        <param name="robot_name" value="Xbot_1"/>
+        <param name="robot_type" value="Xbot"/>
+    </node>
+</launch>

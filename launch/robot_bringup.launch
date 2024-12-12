@@ -9,6 +9,10 @@
       <arg name="image" value="image" />
   </include>
 
-  <node name="mapper" pkg="warehouse_robot" type="mapper.py" output="screen" />
-  <node name="my_odom" pkg="warehouse_robot" type="my_odom.py" output="screen" />
+  <node name="mapper" pkg="warehouse_robot" type="mapper.py" output="screen" >
+    <param name="robot_namespace" value=""/>
+  </node>
+  <node name="my_odom" pkg="warehouse_robot" type="my_odom.py" output="screen" >
+    <param name="robot_namespace" value=""/>
+  </node>
 </launch>
