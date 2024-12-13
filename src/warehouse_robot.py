@@ -56,11 +56,15 @@ class WarehouseRobot:
         self.angle_to_pin = 0.0
         self.current_yaw = 0.0
         self.stored_line_yaw = None  # Will store yaw when we first turn towards fiducial
+        self.temp_line_position = None
+        self.temp_line_yaw = None
 
         # Initial position and orientation
         self.initial_yaw = None
         self.initial_position = None
         self.line_return_yaw = None  # Store yaw when leaving the line
+        self.turn_direction = None  # Will store 1 for clockwise, -1 for counterclockwise
+        self.original_line_yaw = None  # Will store the orientation when on the line
         
         # Mission control
         self.mission_complete = False
@@ -83,6 +87,7 @@ class WarehouseRobot:
             self.initial_yaw = yaw
             self.initial_position = msg.pose.pose.position
             rospy.loginfo(f"Initial yaw set to {math.degrees(self.initial_yaw):.2f} degrees")
+            rospy.loginfo(f"Initial position set to ({self.initial_position.x:.2f}, {self.initial_position.y:.2f})")
     
     def image_cb(self, msg):
         if self.robot_stopped and self.current_state == "LINE_FOLLOWING":
@@ -177,125 +182,206 @@ class WarehouseRobot:
     def calculate_movement(self):
         self.update_pin_position()
         
+        # In the calculate_movement method, modify the LINE_FOLLOWING state:
         if self.current_state == "LINE_FOLLOWING":
             if not self.line_detected:
                 self.twist.linear.x = 0.0
                 self.twist.angular.z = 0.3
+                rospy.loginfo_throttle(1.0, "Searching for line...")
                 return
-                
+                        
             if self.fiducial_found and self.is_parallel_to_pin():
+                # Stop and store current position and orientation
                 self.twist.linear.x = 0.0
                 self.twist.angular.z = 0.0
-                self.line_return_yaw = self.current_yaw
-                rospy.loginfo(f"Storing line return yaw: {math.degrees(self.line_return_yaw):.2f}")
+                pos, _ = self.get_current_position()
+                if pos:
+                    self.temp_line_position = (pos.x, pos.y)
+                    self.original_line_yaw = self.current_yaw
+                    
+                    # Determine which way we need to turn initially
+                    # If pin is on the right, we'll turn clockwise (negative angular.z)
+                    # If pin is on the left, we'll turn counterclockwise (positive angular.z)
+                    if self.pin_position.y > 0:  # Pin is on the left
+                        self.turn_direction = 1  # Counterclockwise
+                    else:  # Pin is on the right
+                        self.turn_direction = -1  # Clockwise
+                        
+                    rospy.loginfo(f"Stored line position at ({pos.x:.2f}, {pos.y:.2f})")
+                    rospy.loginfo(f"Original orientation: {math.degrees(self.original_line_yaw):.2f}")
+                    rospy.loginfo(f"Turn direction: {'counterclockwise' if self.turn_direction > 0 else 'clockwise'}")
+                    
                 rospy.sleep(0.5)
                 self.current_state = "APPROACHING"
                 return
             
+            # Normal line following
             self.twist.linear.x = MAX_SPEED
             self.twist.angular.z = -self.control_signal
                 
         elif self.current_state == "APPROACHING":
             if not self.fiducial_found:
+                rospy.logwarn("Lost sight of fiducial during approach")
                 return
-                    
-            # Smooth approach to fiducial
-            if self.distance_to_pin < 0.20:  # Close enough to fiducial
+                
+            # Calculate smooth approach speed
+            approach_speed = min(APPROACH_SPEED, max(MIN_SPEED, self.distance_to_pin * 0.3))
+            angle_correction = 0.3 * self.angle_to_pin
+            
+            # If very close to fiducial, prepare to stop
+            if self.distance_to_pin < 0.20:  # 20cm from fiducial
                 self.twist.linear.x = 0.0
                 self.twist.angular.z = 0.0
-                # Store exact position where we'll need to return
-                pos, _ = self.get_current_position()
-                if pos:
-                    self.return_position = (pos.x, pos.y)
-                    self.return_yaw = self.current_yaw
-                    rospy.loginfo(f"Stored return position: ({pos.x:.2f}, {pos.y:.2f})")
-                
                 self.robot_stopped = True
+                
                 response = input("At fiducial. Type 'continue' to return home, or 'shutdown': ").lower()
                 if response == 'continue':
                     self.robot_stopped = False
                     self.current_state = "RETURN_TO_LINE"
+                    rospy.loginfo("Starting return journey")
                 elif response == 'shutdown':
-                    self.mission_complete = True
                     self.shutdown_requested = True
                 return
-                    
-            # Smoother approach speed
-            approach_speed = min(APPROACH_SPEED, max(MIN_SPEED, self.distance_to_pin * 0.2))
+                
+            # Smooth approach
             self.twist.linear.x = approach_speed
-            self.twist.angular.z = 0.3 * self.angle_to_pin
+            self.twist.angular.z = angle_correction
 
         elif self.current_state == "RETURN_TO_LINE":
-            if not hasattr(self, 'return_position') or not self.return_position:
-                rospy.logwarn("No return position stored!")
+            if not self.temp_line_position or self.original_line_yaw is None:
+                rospy.logwarn("Missing line position or original orientation!")
                 return
-                
-            # Calculate distance to return point
+                    
+            # Get current position
             pos, _ = self.get_current_position()
             if pos:
-                dx = self.return_position[0] - pos.x
-                dy = self.return_position[1] - pos.y
-                dist_to_return = math.sqrt(dx*dx + dy*dy)
-                angle_to_return = math.atan2(dy, dx)
+                dx = self.temp_line_position[0] - pos.x
+                dy = self.temp_line_position[1] - pos.y
+                dist_to_temp = math.sqrt(dx*dx + dy*dy)
+                angle_to_temp = math.atan2(dy, dx)
                 
-                if dist_to_return > 0.1:  # Not at return point yet
-                    # Turn towards return point
-                    angle_diff = self.normalize_angle(angle_to_return - self.current_yaw)
-                    if abs(angle_diff) > 0.1:
+                rospy.loginfo_throttle(1.0, f"Distance to line: {dist_to_temp:.2f}m")
+                
+                if dist_to_temp > 0.1:  # Not at line position yet
+                    # First turn to face line position
+                    angle_diff = self.normalize_angle(angle_to_temp - self.current_yaw)
+                    
+                    if abs(angle_diff) > 0.05:  # Need to turn more
                         self.twist.linear.x = 0.0
                         self.twist.angular.z = TURN_SPEED if angle_diff > 0 else -TURN_SPEED
-                    else:
-                        # Move towards return point
-                        self.twist.linear.x = min(MAX_SPEED, dist_to_return * 0.5)
-                        self.twist.angular.z = 0.3 * angle_diff
-                else:
-                    # At return point, turn towards home
-                    self.current_state = "TURN_TO_HOME"
-                    rospy.loginfo("At return point, turning towards home")
+                        return
+                        
+                    # Move towards line position
+                    self.twist.linear.x = min(MAX_SPEED, dist_to_temp * 0.5)
+                    self.twist.angular.z = 0.3 * angle_diff
+                    return
+                        
+                else:  # At line position, turn opposite of original turn
+                    self.twist.linear.x = 0.0
+                    # Use the opposite of the original turn direction
+                    self.twist.angular.z = TURN_SPEED * (-self.turn_direction)
+                    
+                    # Check if we've turned back to approximately the opposite of original orientation
+                    target_yaw = self.normalize_angle(self.original_line_yaw + math.pi)
+                    yaw_diff = self.normalize_angle(self.current_yaw - target_yaw)
+                    
+                    rospy.loginfo_throttle(1.0, 
+                        f"Turning to face home. Current: {math.degrees(self.current_yaw):.1f}, " +
+                        f"Target: {math.degrees(target_yaw):.1f}, " +
+                        f"Diff: {math.degrees(yaw_diff):.1f}")
+                    
+                    if abs(yaw_diff) < 0.1:  # Successfully turned to face home
+                        self.twist.linear.x = 0.0
+                        self.twist.angular.z = 0.0
+                        rospy.sleep(0.5)
+                        self.current_state = "RETURNING"
+                        rospy.loginfo("Oriented towards home, starting return journey")
+                    return
 
         elif self.current_state == "TURN_TO_HOME":
-            yaw_diff = self.normalize_angle(self.current_yaw - self.initial_yaw)
-            
-            if abs(yaw_diff) > 0.1:
+            # Calculate vector from current position to home
+            pos, _ = self.get_current_position()
+            if pos and self.initial_position:
+                dx = self.initial_position.x - pos.x
+                dy = self.initial_position.y - pos.y
+                target_yaw = math.atan2(dy, dx)  # Calculate angle to home
+                yaw_diff = self.normalize_angle(target_yaw - self.current_yaw)
+                
+                rospy.loginfo_throttle(1.0, 
+                    f"Turn to home - Current: {math.degrees(self.current_yaw):.1f}, " +
+                    f"Target: {math.degrees(target_yaw):.1f}, " +
+                    f"Diff: {math.degrees(yaw_diff):.1f}")
+                
+                if abs(yaw_diff) > 0.1:
+                    turn_speed = min(TURN_SPEED, max(0.1, abs(yaw_diff) * 0.5))
+                    self.twist.linear.x = 0.0
+                    self.twist.angular.z = turn_speed if yaw_diff > 0 else -turn_speed
+                    return
+                
+                # Done turning, start returning
                 self.twist.linear.x = 0.0
-                self.twist.angular.z = TURN_SPEED if yaw_diff < 0 else -TURN_SPEED
-                return
-            else:
-                rospy.loginfo("Aligned with home direction")
+                self.twist.angular.z = 0.0
+                rospy.sleep(0.5)
                 self.current_state = "RETURNING"
+                rospy.loginfo("Aligned with home, starting return journey")
                 return
 
         elif self.current_state == "RETURNING":
+            # Follow the line back to home
             if not self.line_detected:
                 self.twist.linear.x = 0.0
                 self.twist.angular.z = 0.3
-                return
-            
-            self.twist.linear.x = MAX_SPEED
-            self.twist.angular.z = -self.control_signal
-            
-            if self.is_at_home():
-                self.twist.linear.x = 0.0
-                self.twist.angular.z = 0.0
-                rospy.loginfo("Reached home position")
-                self.current_state = "FACE_FIDUCIALS"
+                rospy.loginfo("Searching for line on return...")
                 return
 
-        elif self.current_state == "FACE_FIDUCIALS":
-            target_yaw = self.normalize_angle(self.initial_yaw + math.pi)
-            yaw_diff = abs(self.normalize_angle(self.current_yaw - target_yaw))
+            # Follow the line
+            self.twist.linear.x = MAX_SPEED
+            self.twist.angular.z = -self.control_signal
+            rospy.loginfo_throttle(1.0, "Returning to home...")
+
+            # Check if back to initial orientation and position
+            if self.is_at_home():
+                # Stop completely first
+                self.twist.linear.x = 0.0
+                self.twist.angular.z = 0.0
+                self.cmd_vel_pub.publish(self.twist)
+                rospy.sleep(1.0)  # Pause to ensure complete stop
+                
+                # Start the 180-degree turn
+                self.current_state = "TURN_180"
+                self.turn_start_yaw = self.current_yaw  # Store starting orientation
+                rospy.loginfo("At home - starting 180 degree turn")
+                return
+
+        elif self.current_state == "TURN_180":
+            # Calculate how far we've turned
+            angle_turned = self.normalize_angle(self.current_yaw - self.turn_start_yaw)
+            angle_remaining = math.pi - abs(angle_turned)  # How far to go to reach 180°
             
-            if yaw_diff > 0.1:
+            rospy.loginfo_throttle(1.0, f"Turning 180 - Turned: {math.degrees(abs(angle_turned)):.1f}°")
+            
+            if angle_remaining > 0.1:  # Still need to turn
+                # Simple constant turn
                 self.twist.linear.x = 0.0
                 self.twist.angular.z = TURN_SPEED
                 return
+            
+            # Turn complete - stop and get next fiducial
+            self.twist.linear.x = 0.0
+            self.twist.angular.z = 0.0
+            self.cmd_vel_pub.publish(self.twist)
+            rospy.sleep(0.5)  # Brief pause
+            
+            # Get next fiducial
+            rospy.loginfo("Turn complete - getting next fiducial")
+            new_id = self.get_next_fiducial()
+            if new_id:
+                self.target_fiducial = new_id
+                rospy.loginfo(f"New target fiducial set to {self.target_fiducial}")
+                self.current_state = "LINE_FOLLOWING"
             else:
-                self.twist.linear.x = 0.0
-                self.twist.angular.z = 0.0
-                self.robot_stopped = True
                 self.mission_complete = True
-                rospy.loginfo("Ready for next mission")
-                return
+            return
 
     def normalize_angle(self, angle):
         while angle > math.pi:
@@ -314,32 +400,36 @@ class WarehouseRobot:
             return None, None
         
     def is_at_home(self):
+        """Determine if the robot has returned to home"""
         if not self.initial_position:
             return False
         
+        # Get current position from odometry
         try:
             odom = rospy.wait_for_message('/odom', Odometry, timeout=1.0)
             current_pos = odom.pose.pose.position
             dx = current_pos.x - self.initial_position.x
             dy = current_pos.y - self.initial_position.y
             distance = math.sqrt(dx**2 + dy**2)
-            
-            return distance < 0.2
+            rospy.loginfo(f"Returning - Distance from home: {distance:.3f}m")
+            return distance < 0.2  # Threshold to consider as home
         except rospy.ROSException:
             return False
 
     def run(self):
         self.shutdown_requested = False
+        rate = rospy.Rate(10)
         
         while not rospy.is_shutdown() and not self.shutdown_requested:
-            rospy.loginfo(f"Starting mission to fiducial {self.target_fiducial}")
-            rate = rospy.Rate(10)
+            rospy.loginfo(f"\nStarting mission to fiducial {self.target_fiducial}")
             
             # Reset state for new mission
             self.mission_complete = False
             self.robot_stopped = False
             self.current_state = "LINE_FOLLOWING"
-            self.return_position = None
+            self.temp_line_position = None
+            self.temp_line_yaw = None
+            self.turn_direction = None
             
             # Main control loop
             while not rospy.is_shutdown() and not self.mission_complete:
@@ -348,30 +438,63 @@ class WarehouseRobot:
                     self.cmd_vel_pub.publish(self.twist)
                 rate.sleep()
             
-            # If mission complete and not shutdown requested, get next fiducial
-            if not self.shutdown_requested and self.mission_complete:
-                response = input("Mission complete. 'next' for new fiducial or 'shutdown': ").lower()
-                if response == 'next':
-                    self.target_fiducial = self.get_next_fiducial()
-                else:
-                    self.shutdown_requested = True
-            
-            # Stop robot
+            # After mission completion, ensure robot is fully stopped
             self.twist.linear.x = 0.0
             self.twist.angular.z = 0.0
             self.cmd_vel_pub.publish(self.twist)
+            
+            # Get next fiducial or shutdown
+            response = input("\nMission complete. Enter 'next' for new fiducial or 'shutdown': ").lower()
+            if response == 'next':
+                new_id = self.get_next_fiducial()
+                if new_id:
+                    self.target_fiducial = new_id
+                    rospy.loginfo(f"New target fiducial set to {self.target_fiducial}")
+                else:
+                    self.shutdown_requested = True
+            else:
+                self.shutdown_requested = True
         
         rospy.loginfo("Robot shutting down.")
+
+    def is_at_home(self):
+        """Determine if the robot has returned to home"""
+        if not self.initial_position:
+            return False
+
+        # Get current position from odometry
+        try:
+            odom = rospy.wait_for_message('/odom', Odometry, timeout=1.0)
+            current_pos = odom.pose.pose.position
+            dx = current_pos.x - self.initial_position.x
+            dy = current_pos.y - self.initial_position.y
+            distance = math.sqrt(dx**2 + dy**2)
+            rospy.loginfo_throttle(1.0, f"Distance from home: {distance:.3f}m")
+            return distance < 0.2  # Threshold to consider as home
+        except rospy.ROSException:
+            return False
+
+    def get_next_fiducial(self):
+        """Get next fiducial ID from user"""
+        while True:
+            try:
+                print("\nAvailable fiducial IDs: 106, 100, 108")
+                fiducial_id = int(input("Enter the target fiducial ID: "))
+                if fiducial_id in [106, 100, 108]:
+                    return fiducial_id
+                print("Invalid fiducial ID. Please choose from 106, 100, or 108.")
+            except ValueError:
+                print("Please enter a valid number.")
 
 def get_valid_fiducial_id():
     """Get valid fiducial ID from user input"""
     while True:
         try:
-            print("\nAvailable fiducial IDs: 104, 100, 108")
+            print("\nAvailable fiducial IDs: 106, 100, 108")
             fiducial_id = int(input("Enter the target fiducial ID: "))
-            if fiducial_id in [104, 100, 108]:
+            if fiducial_id in [106, 100, 108]:
                 return fiducial_id
-            print("Invalid fiducial ID. Please choose from 104, 100, or 108.")
+            print("Invalid fiducial ID. Please choose from 106, 100, or 108.")
         except ValueError:
             print("Please enter a valid number.")
 
@@ -385,3 +508,4 @@ if __name__ == '__main__':
         robot.run()
     except rospy.ROSInterruptException:
         pass
+
