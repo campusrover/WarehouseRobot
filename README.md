@@ -22,7 +22,6 @@ This research project focuses on the development of an autonomous WarehouseRobot
 
 2. Bring up the Turtlebot:
     ```bash
-    roslaunch turtlebot3_bringup right2.launch
     roslaunch WarehouseRobot robot_bringup.launch
     ```
     
