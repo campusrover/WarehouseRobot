@@ -1,5 +1,5 @@
 
-# Precision Agriculture Robot
+# Warehouse Robot
 
 This research project focuses on the development of an autonomous WarehouseRobot platform equipped with a precision object-detection and item-handling system. It integrates onboard and remote systems to enable efficient, automated item retrieval and delivery for warehouse operations.
 
@@ -17,7 +17,7 @@ This research project focuses on the development of an autonomous WarehouseRobot
 
 1. Clone the repository to your local machine:
     ```bash
-    git clone https://github.com/your-repo/precision-agriculture-robot.git
+    git clone https://github.com/your-repo/warehouse-robot.git
     ```
 
 2. Bring up the Turtlebot:
