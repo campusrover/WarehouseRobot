@@ -457,23 +457,6 @@ class WarehouseRobot:
         
         rospy.loginfo("Robot shutting down.")
 
-    def is_at_home(self):
-        """Determine if the robot has returned to home"""
-        if not self.initial_position:
-            return False
-
-        # Get current position from odometry
-        try:
-            odom = rospy.wait_for_message('/odom', Odometry, timeout=1.0)
-            current_pos = odom.pose.pose.position
-            dx = current_pos.x - self.initial_position.x
-            dy = current_pos.y - self.initial_position.y
-            distance = math.sqrt(dx**2 + dy**2)
-            rospy.loginfo_throttle(1.0, f"Distance from home: {distance:.3f}m")
-            return distance < 0.2  # Threshold to consider as home
-        except rospy.ROSException:
-            return False
-
     def get_next_fiducial(self):
         """Get next fiducial ID from user"""
         while True:
